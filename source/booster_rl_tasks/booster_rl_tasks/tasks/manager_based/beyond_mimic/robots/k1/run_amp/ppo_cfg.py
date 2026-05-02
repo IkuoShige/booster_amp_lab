@@ -1,29 +1,44 @@
+import os
+
 from isaaclab.utils import configclass
+from booster_assets import BOOSTER_ASSETS_DIR
 from booster_rl_tasks.tasks.manager_based.beyond_mimic.agents.rsl_rl_ppo_cfg import BaseAMPAgentCfg
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg, RslRlSymmetryCfg, RslRlRndCfg
 from booster_rl_tasks.tasks.manager_based.beyond_mimic.mdp import symmetry
 
 
+_AMP_ROOT = os.path.join(BOOSTER_ASSETS_DIR, "motions", "K1", "motion_amp_expert")
+
+
 @configclass
 class PPORunnerCfg(BaseAMPAgentCfg):
     max_iterations = 50000
-    experiment_name = "run_amp"
+    experiment_name = "run_amp_y"
 
     # amp parameter
-    # Experiment D: reduce AMP influence (0.3 -> 0.2) so the discriminator
-    # pulls the policy toward walk/run modes less strongly in the 1.0-1.3
-    # m/s mid range where no single-speed expert exists.
+    # Omni-directional run: corpus has 4 forward modes × {own data} + 4 lateral
+    # modes × {left, right} mirrored. Discriminator receives lateral as style
+    # prior alongside forward. Coef kept at 0.2.
     amp_reward_coef = 0.2
-    # High-speed specialist: command range is (0.5, 2.0) m/s. Use the full
-    # locomotion expert set (walk 0.59, walk2run transit, run 2.68, run2walk
-    # transit) so the discriminator has in-distribution references across
-    # the command band. Slow-walk synthetic clips are not used here because
-    # commands below 0.5 are not exercised.
+    # Forward (walk 0.8, walk2run 0.5, run 0.8, run2walk 0.5) — total weight 2.6.
+    # Lateral 8 clips × 0.3 = 2.4 → forward / lateral sampling ≈ 52 / 48.
+    # Both left and right are included because the AMP discriminator does not
+    # auto-mirror joint slots — strafe_left and strafe_right have distinct
+    # joint signatures (Left_Hip vs Right_Hip slot exchange + roll sign flip)
+    # so the discriminator must see both to score either direction as natural.
     amp_motion_files = [
-        "/root/booster_rl_tasks/booster_assets/motions/K1/motion_amp_expert/walk.txt",
-        "/root/booster_rl_tasks/booster_assets/motions/K1/motion_amp_expert/walk2run.txt",
-        "/root/booster_rl_tasks/booster_assets/motions/K1/motion_amp_expert/run.txt",
-        "/root/booster_rl_tasks/booster_assets/motions/K1/motion_amp_expert/run2walk.txt",
+        os.path.join(_AMP_ROOT, "walk.txt"),
+        os.path.join(_AMP_ROOT, "walk2run.txt"),
+        os.path.join(_AMP_ROOT, "run.txt"),
+        os.path.join(_AMP_ROOT, "run2walk.txt"),
+        os.path.join(_AMP_ROOT, "lateral", "strafe_walk_left.txt"),
+        os.path.join(_AMP_ROOT, "lateral", "strafe_walk_right.txt"),
+        os.path.join(_AMP_ROOT, "lateral", "strafe_walk2run_left.txt"),
+        os.path.join(_AMP_ROOT, "lateral", "strafe_walk2run_right.txt"),
+        os.path.join(_AMP_ROOT, "lateral", "strafe_run_left.txt"),
+        os.path.join(_AMP_ROOT, "lateral", "strafe_run_right.txt"),
+        os.path.join(_AMP_ROOT, "lateral", "strafe_run2walk_left.txt"),
+        os.path.join(_AMP_ROOT, "lateral", "strafe_run2walk_right.txt"),
     ]
     amp_num_preload_transitions = 200000
     # NOTE: amp_task_reward_lerp is read but not applied by the vendored

@@ -78,15 +78,16 @@ class CommandsCfg:
     base_velocity = mdp.UniformVelocityCommandCfg(
         asset_name="robot",
         resampling_time_range=(10.0, 10.0),
-        # Matches baseline to keep the ablation clean. Low-speed / standing
-        # robustness is not the focus of this experiment.
+        # Omni-directional: x range starts at 0 so pure side-step is sampled,
+        # y range matches retargeted strafe clip speeds (~0.5 m/s peak).
+        # rel_standing_envs kept at 0.02 to focus learning on moving commands.
         rel_standing_envs=0.02,
         rel_heading_envs=1.0,
         heading_command=False,
         heading_control_stiffness=0.5,
         debug_vis=True,
         ranges=mdp.UniformVelocityCommandCfg.Ranges(
-            lin_vel_x=(0.5, 2.0), lin_vel_y=(0.0, 0.0), ang_vel_z=(-0.3, 0.3)
+            lin_vel_x=(0.0, 2.0), lin_vel_y=(-0.5, 0.5), ang_vel_z=(-0.3, 0.3)
         ),
     )
 
