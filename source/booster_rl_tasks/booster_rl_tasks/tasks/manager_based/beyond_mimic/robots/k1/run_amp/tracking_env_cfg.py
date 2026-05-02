@@ -139,13 +139,20 @@ class ObservationsCfg:
             self.concatenate_terms = True
     @configclass
     class AMPObsCfg(ObsGroup):
-
+        # 62-col layout: joint_pos[22] + joint_vel[22] + EE_pos_b[12]
+        #                + base_lin_vel_b[3] + base_ang_vel_b[3].
+        # Order MUST match the AMP txt corpus column layout consumed by the
+        # discriminator (see AMPLoader.OBS_DIM_WITH_ROOT). Adding root
+        # velocities lets the discriminator penalize "kick-without-COM-shift"
+        # gait modes that pass joint+EE only.
         joint_pos = ObsTerm(func=mdp.joint_pos, clip=(-100.0, 100.0), scale=1.0,)
         joint_vel = ObsTerm(func=mdp.joint_vel, clip=(-100.0, 100.0), scale=1.0,)
         left_hand_pos = ObsTerm(func=mdp.get_lefthand_pos, clip=(-100.0, 100.0), scale=1.0,)
         right_hand_pos = ObsTerm(func=mdp.get_righthand_pos, clip=(-100.0, 100.0), scale=1.0,)
         left_foot_pos = ObsTerm(func=mdp.get_leftfoot_pos, clip=(-100.0, 100.0), scale=1.0,)
         right_foot_pos = ObsTerm(func=mdp.get_rightfoot_pos, clip=(-100.0, 100.0), scale=1.0,)
+        base_lin_vel = ObsTerm(func=mdp.base_lin_vel, clip=(-100.0, 100.0), scale=1.0,)
+        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, clip=(-100.0, 100.0), scale=1.0,)
 
         def __post_init__(self):
             self.enable_corruption = False

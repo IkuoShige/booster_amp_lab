@@ -30,6 +30,12 @@ class AMPLoader:
 
     END_EFFECTOR_POS_SIZE = 12
 
+    # Optional root-velocity channels appended after EE_pos. Always present for
+    # 62-col corpora (omni locomotion incl. backward/pivot); absent for legacy
+    # 56-col corpora -> consumers must guard via `has_root_vel`.
+    ROOT_LIN_VEL_SIZE = 3
+    ROOT_ANG_VEL_SIZE = 3
+
     JOINT_POSE_START_IDX = 0
     JOINT_POSE_END_IDX = JOINT_POSE_START_IDX + JOINT_POS_SIZE
 
@@ -38,6 +44,15 @@ class AMPLoader:
 
     END_POS_START_IDX = JOINT_VEL_END_IDX
     END_POS_END_IDX = END_POS_START_IDX + END_EFFECTOR_POS_SIZE
+
+    ROOT_LIN_VEL_START_IDX = END_POS_END_IDX
+    ROOT_LIN_VEL_END_IDX = ROOT_LIN_VEL_START_IDX + ROOT_LIN_VEL_SIZE
+
+    ROOT_ANG_VEL_START_IDX = ROOT_LIN_VEL_END_IDX
+    ROOT_ANG_VEL_END_IDX = ROOT_ANG_VEL_START_IDX + ROOT_ANG_VEL_SIZE
+
+    OBS_DIM_NO_ROOT = END_POS_END_IDX            # 56
+    OBS_DIM_WITH_ROOT = ROOT_ANG_VEL_END_IDX     # 62
 
     def __init__(
         self,
@@ -65,17 +80,31 @@ class AMPLoader:
         self.trajectory_frame_durations = []
         self.trajectory_num_frames = []
 
+        loaded_obs_dim: int | None = None
         for i, motion_file in enumerate(motion_files):
             self.trajectory_names.append(motion_file.split(".")[0])
             with open(motion_file) as f:
                 motion_json = json.load(f)
                 motion_data = np.array(motion_json["Frames"])
-                # Remove first 7 observation dimensions (root_pos and root_orn).
+                # Accept 56-col (legacy joint+EE) or 62-col (joint+EE+root_lin/ang_vel).
+                # All clips loaded together must agree.
+                width = motion_data.shape[1]
+                if width not in (AMPLoader.OBS_DIM_NO_ROOT, AMPLoader.OBS_DIM_WITH_ROOT):
+                    raise ValueError(
+                        f"{motion_file}: expected {AMPLoader.OBS_DIM_NO_ROOT} or "
+                        f"{AMPLoader.OBS_DIM_WITH_ROOT} columns, got {width}"
+                    )
+                if loaded_obs_dim is None:
+                    loaded_obs_dim = width
+                elif width != loaded_obs_dim:
+                    raise ValueError(
+                        f"{motion_file}: width {width} does not match earlier clip width {loaded_obs_dim}"
+                    )
                 self.trajectories.append(
-                    torch.tensor(motion_data[:, : AMPLoader.END_POS_END_IDX], dtype=torch.float32, device=device)
+                    torch.tensor(motion_data, dtype=torch.float32, device=device)
                 )
                 self.trajectories_full.append(
-                    torch.tensor(motion_data[:, : AMPLoader.END_POS_END_IDX], dtype=torch.float32, device=device)
+                    torch.tensor(motion_data, dtype=torch.float32, device=device)
                 )
                 self.trajectory_idxs.append(i)
                 self.trajectory_weights.append(float(motion_json["MotionWeight"]))
@@ -169,27 +198,20 @@ class AMPLoader:
         frame_start = self.trajectories_full[traj_idx][idx_low]
         frame_end = self.trajectories_full[traj_idx][idx_high]
         blend = p * n - idx_low
-        return self.blend_frame_pose(frame_start, frame_end, blend)
+        return self.slerp(frame_start, frame_end, blend)
 
     def get_full_frame_at_time_batch(self, traj_idxs, times):
         p = times / self.trajectory_lens[traj_idxs]
         n = self.trajectory_num_frames[traj_idxs]
         idx_low, idx_high = np.floor(p * n).astype(np.int64), np.ceil(p * n).astype(np.int64)
-        all_frame_amp_starts = torch.zeros(
-            len(traj_idxs), AMPLoader.END_POS_END_IDX - AMPLoader.JOINT_POSE_START_IDX, device=self.device
-        )
-        all_frame_amp_ends = torch.zeros(
-            len(traj_idxs), AMPLoader.END_POS_END_IDX - AMPLoader.JOINT_POSE_START_IDX, device=self.device
-        )
+        obs_dim = self.observation_dim
+        all_frame_amp_starts = torch.zeros(len(traj_idxs), obs_dim, device=self.device)
+        all_frame_amp_ends = torch.zeros(len(traj_idxs), obs_dim, device=self.device)
         for traj_idx in set(traj_idxs):
             trajectory = self.trajectories_full[traj_idx]
             traj_mask = traj_idxs == traj_idx
-            all_frame_amp_starts[traj_mask] = trajectory[idx_low[traj_mask]][
-                :, AMPLoader.JOINT_POSE_START_IDX : AMPLoader.END_POS_END_IDX
-            ]
-            all_frame_amp_ends[traj_mask] = trajectory[idx_high[traj_mask]][
-                :, AMPLoader.JOINT_POSE_START_IDX : AMPLoader.END_POS_END_IDX
-            ]
+            all_frame_amp_starts[traj_mask] = trajectory[idx_low[traj_mask]]
+            all_frame_amp_ends[traj_mask] = trajectory[idx_high[traj_mask]]
         blend = torch.tensor(p * n - idx_low, device=self.device, dtype=torch.float32).unsqueeze(-1)
 
         amp_blend = self.slerp(all_frame_amp_starts, all_frame_amp_ends, blend)
@@ -241,8 +263,8 @@ class AMPLoader:
         for _ in range(num_mini_batch):
             if self.preload_transitions:
                 idxs = np.random.choice(self.preloaded_s.shape[0], size=mini_batch_size)
-                s = self.preloaded_s[idxs, AMPLoader.JOINT_POSE_START_IDX : AMPLoader.END_POS_END_IDX]
-                s_next = self.preloaded_s_next[idxs, AMPLoader.JOINT_POSE_START_IDX : AMPLoader.END_POS_END_IDX]
+                s = self.preloaded_s[idxs]
+                s_next = self.preloaded_s_next[idxs]
             else:
                 s, s_next = [], []
                 traj_idxs = self.weighted_traj_idx_sample_batch(mini_batch_size)
@@ -281,3 +303,19 @@ class AMPLoader:
 
     def get_end_pos_batch(poses):
         return poses[:, AMPLoader.END_POS_START_IDX : AMPLoader.END_POS_END_IDX]
+
+    def get_root_lin_vel(pose):
+        return pose[AMPLoader.ROOT_LIN_VEL_START_IDX : AMPLoader.ROOT_LIN_VEL_END_IDX]
+
+    def get_root_lin_vel_batch(poses):
+        return poses[:, AMPLoader.ROOT_LIN_VEL_START_IDX : AMPLoader.ROOT_LIN_VEL_END_IDX]
+
+    def get_root_ang_vel(pose):
+        return pose[AMPLoader.ROOT_ANG_VEL_START_IDX : AMPLoader.ROOT_ANG_VEL_END_IDX]
+
+    def get_root_ang_vel_batch(poses):
+        return poses[:, AMPLoader.ROOT_ANG_VEL_START_IDX : AMPLoader.ROOT_ANG_VEL_END_IDX]
+
+    @property
+    def has_root_vel(self) -> bool:
+        return self.observation_dim == AMPLoader.OBS_DIM_WITH_ROOT
