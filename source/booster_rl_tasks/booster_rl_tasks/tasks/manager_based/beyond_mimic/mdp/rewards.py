@@ -204,6 +204,32 @@ def stay_alive(env: ManagerBasedRLEnv) -> torch.Tensor:
     """Reward for staying alive."""
     return torch.ones(env.num_envs, device=env.device)
 
+
+def feet_slide(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Penalize horizontal foot velocity while the foot is in contact.
+
+    Uses a contact threshold on net_forces_w to detect ground contact, then
+    accumulates the horizontal (xy) linear velocity magnitude of the foot
+    bodies that are currently in contact. Encourages the policy to reach
+    commanded base speeds through real stepping rather than by sliding feet
+    against the ground.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    # shape: (num_envs, history, num_bodies, 3)
+    forces_history = contact_sensor.data.net_forces_w_history
+    # max over history to be robust to single-step noise
+    in_contact = (
+        torch.max(torch.norm(forces_history[:, :, sensor_cfg.body_ids], dim=-1), dim=1)[0] > 1.0
+    )  # (num_envs, num_bodies)
+    asset: Articulation = env.scene[asset_cfg.name]
+    body_vel_xy = asset.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :2]  # (num_envs, num_bodies, 2)
+    speed_xy = torch.norm(body_vel_xy, dim=-1)  # (num_envs, num_bodies)
+    return torch.sum(speed_xy * in_contact, dim=1)
+
 def _get_body_indexes(command: MotionCommand, body_names: list[str] | None) -> list[int]:
     return [i for i, name in enumerate(command.cfg.body_names) if (body_names is None) or (name in body_names)]
 
