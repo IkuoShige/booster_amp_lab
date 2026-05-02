@@ -38,14 +38,25 @@ parser.add_argument(
 )
 parser.add_argument("--agent", type=str, default="rsl_rl_cfg_entry_point")
 parser.add_argument("--seed", type=int, default=None)
+parser.add_argument(
+    "--viser",
+    action="store_true",
+    default=False,
+    help="Stream eval to a viser web viewer for visual inspection while bands run.",
+)
+parser.add_argument("--viser_host", type=str, default="0.0.0.0")
+parser.add_argument("--viser_port", type=int, default=8080)
 cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
+# viser reads tensors directly so we still run headless
 args_cli.headless = True
 sys.argv = [sys.argv[0]] + hydra_args
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
+
+import time
 
 import torch
 import gymnasium as gym
@@ -131,6 +142,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     cmd_term = env.unwrapped.command_manager.get_term("base_velocity")
     robot = env.unwrapped.scene["robot"]
 
+    bridge = None
+    if args_cli.viser:
+        from viser_bridge import BoosterViserBridge
+
+        bridge = BoosterViserBridge(
+            env.unwrapped, host=args_cli.viser_host, port=args_cli.viser_port,
+        )
+
+    sim_dt = float(env.unwrapped.step_dt)
+
     obs, _ = env.get_observations()
     if args_cli.axis == "x":
         label = "cmd_vx"
@@ -156,21 +177,40 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             return _robot.data.root_lin_vel_b[:, 0].detach().clone()
         return _robot.data.root_ang_vel_b[:, 2].detach().clone()
 
+    def _step_with_bridge(action):
+        nonlocal obs
+        if bridge is not None:
+            bridge.apply_joystick(cmd_term)
+        out_obs, _, _, _ = env.step(action)
+        obs = out_obs
+        if bridge is not None:
+            bridge.update()
+
     results = []
     for c in args_cli.commands:
         with torch.inference_mode():
             set_cmd(c)
             for _ in range(args_cli.warmup_steps):
+                t0 = time.time()
                 actions = policy(obs)
-                obs, _, _, _ = env.step(actions)
+                _step_with_bridge(actions)
                 set_cmd(c)
+                if bridge is not None:
+                    sleep = sim_dt - (time.time() - t0)
+                    if sleep > 0:
+                        time.sleep(sleep)
 
             samples = []
             for _ in range(args_cli.measure_steps):
+                t0 = time.time()
                 actions = policy(obs)
-                obs, _, _, _ = env.step(actions)
+                _step_with_bridge(actions)
                 set_cmd(c)
                 samples.append(measured(robot))
+                if bridge is not None:
+                    sleep = sim_dt - (time.time() - t0)
+                    if sleep > 0:
+                        time.sleep(sleep)
 
             arr = torch.stack(samples, dim=0)
             mean_v = arr.mean().item()
@@ -180,6 +220,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             results.append((c, mean_v, std_v, err_v, ratio))
             print(f"{c:8.2f} | {mean_v:9.3f} | {std_v:7.3f} | {err_v:7.3f} | {ratio:6.2f}")
 
+    if bridge is not None:
+        bridge.close()
     env.close()
 
 

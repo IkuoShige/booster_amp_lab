@@ -35,6 +35,14 @@ parser.add_argument(
     help="Use the pre-trained checkpoint from Nucleus.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument(
+    "--viser",
+    action="store_true",
+    default=False,
+    help="Stream the policy to a viser web viewer (browser-based 3D view + joystick).",
+)
+parser.add_argument("--viser_host", type=str, default="0.0.0.0", help="Viser server bind host.")
+parser.add_argument("--viser_port", type=int, default=8080, help="Viser server port.")
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -235,12 +243,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         filename=f"{agent_cfg.experiment_name}_{run_name}.onnx"
     )
 
-    if args_cli.headless and not args_cli.video:
+    if args_cli.headless and not args_cli.video and not args_cli.viser:
         print("[INFO] Headless mode and no video recording. Exiting after model export.")
         env.close()
         return
 
     dt = env.unwrapped.step_dt
+
+    # optional viser web viewer
+    bridge = None
+    cmd_term = None
+    if args_cli.viser:
+        from viser_bridge import BoosterViserBridge
+
+        bridge = BoosterViserBridge(
+            env.unwrapped, host=args_cli.viser_host, port=args_cli.viser_port,
+        )
+        try:
+            cmd_term = env.unwrapped.command_manager.get_term("base_velocity")
+        except Exception:
+            cmd_term = None
 
     # reset environment
     obs = env.get_observations()
@@ -252,10 +274,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         start_time = time.time()
         # run everything in inference mode
         with torch.inference_mode():
+            # apply joystick override before stepping so the policy sees it next step
+            if bridge is not None and cmd_term is not None:
+                bridge.apply_joystick(cmd_term)
             # agent stepping
             actions = policy(obs)
             # env stepping
             obs, _, _, _ = env.step(actions)
+        if bridge is not None:
+            bridge.update()
         if args_cli.video:
             timestep += 1
             # Exit the play loop after recording one video
@@ -264,10 +291,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
         # time delay for real-time evaluation
         sleep_time = dt - (time.time() - start_time)
-        if args_cli.real_time and sleep_time > 0:
+        if (args_cli.real_time or args_cli.viser) and sleep_time > 0:
             time.sleep(sleep_time)
 
     # close the simulator
+    if bridge is not None:
+        bridge.close()
     env.close()
 
 
