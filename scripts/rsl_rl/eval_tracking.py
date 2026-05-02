@@ -19,9 +19,9 @@ parser.add_argument("--warmup_steps", type=int, default=100)
 parser.add_argument("--measure_steps", type=int, default=300)
 parser.add_argument(
     "--axis",
-    choices=["x", "yaw"],
+    choices=["x", "y", "yaw"],
     default="x",
-    help="Which command axis to probe: lin_vel_x or ang_vel_z.",
+    help="Which command axis to probe: lin_vel_x, lin_vel_y, or ang_vel_z.",
 )
 parser.add_argument(
     "--lin_vel_x_during_yaw",
@@ -30,11 +30,17 @@ parser.add_argument(
     help="Fixed forward velocity command while sweeping yaw (m/s).",
 )
 parser.add_argument(
+    "--lin_vel_x_during_y",
+    type=float,
+    default=0.0,
+    help="Fixed forward velocity command while sweeping y (m/s).",
+)
+parser.add_argument(
     "--commands",
     type=float,
     nargs="+",
     default=[0.2, 0.5, 0.8, 1.0, 1.3, 1.6, 1.9],
-    help="Commands to probe. Units depend on --axis (m/s for x, rad/s for yaw).",
+    help="Commands to probe. Units depend on --axis (m/s for x/y, rad/s for yaw).",
 )
 parser.add_argument("--agent", type=str, default="rsl_rl_cfg_entry_point")
 parser.add_argument("--seed", type=int, default=None)
@@ -153,29 +159,43 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     sim_dt = float(env.unwrapped.step_dt)
 
     obs, _ = env.get_observations()
-    if args_cli.axis == "x":
-        label = "cmd_vx"
-        unit = "m/s"
-    else:
-        label = "cmd_yaw"
-        unit = "rad/s"
-    print(f"\n{label:>8} | {'mean':>9} | {'std':>7} | {'err':>7} | {'ratio':>6}    [{unit}]")
-    print("-" * 60)
+    AXIS_LABELS = {"x": ("cmd_vx", "m/s"), "y": ("cmd_vy", "m/s"), "yaw": ("cmd_yaw", "rad/s")}
+    label, unit = AXIS_LABELS[args_cli.axis]
+    # Spillover columns: when sweeping x report (vy, wz); when sweeping y report (vx, wz);
+    # when sweeping yaw report (vx, vy). They quantify command-axis cross talk.
+    SPILL_HEADERS = {"x": ("vy", "wz"), "y": ("vx", "wz"), "yaw": ("vx", "vy")}
+    spill_a, spill_b = SPILL_HEADERS[args_cli.axis]
+    header = (
+        f"\n{label:>8} | {'mean':>9} | {'std':>7} | {'err':>7} | {'ratio':>6} |"
+        f" {spill_a:>7} | {spill_b:>7}    [{unit}]"
+    )
+    print(header)
+    print("-" * len(header))
 
     def set_cmd(value):
         if args_cli.axis == "x":
             cmd_term.vel_command_b[:, 0] = value
             cmd_term.vel_command_b[:, 1] = 0.0
             cmd_term.vel_command_b[:, 2] = 0.0
-        else:
+        elif args_cli.axis == "y":
+            cmd_term.vel_command_b[:, 0] = args_cli.lin_vel_x_during_y
+            cmd_term.vel_command_b[:, 1] = value
+            cmd_term.vel_command_b[:, 2] = 0.0
+        else:  # yaw
             cmd_term.vel_command_b[:, 0] = args_cli.lin_vel_x_during_yaw
             cmd_term.vel_command_b[:, 1] = 0.0
             cmd_term.vel_command_b[:, 2] = value
 
     def measured(_robot):
+        # returns (primary, spill_a, spill_b)
+        vx = _robot.data.root_lin_vel_b[:, 0]
+        vy = _robot.data.root_lin_vel_b[:, 1]
+        wz = _robot.data.root_ang_vel_b[:, 2]
         if args_cli.axis == "x":
-            return _robot.data.root_lin_vel_b[:, 0].detach().clone()
-        return _robot.data.root_ang_vel_b[:, 2].detach().clone()
+            return torch.stack([vx, vy, wz], dim=-1).detach().clone()
+        if args_cli.axis == "y":
+            return torch.stack([vy, vx, wz], dim=-1).detach().clone()
+        return torch.stack([wz, vx, vy], dim=-1).detach().clone()
 
     def _step_with_bridge(action):
         nonlocal obs
@@ -212,13 +232,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     if sleep > 0:
                         time.sleep(sleep)
 
-            arr = torch.stack(samples, dim=0)
-            mean_v = arr.mean().item()
-            std_v = arr.std().item()
-            err_v = (arr - c).abs().mean().item()
+            arr = torch.stack(samples, dim=0)  # (T, num_envs, 3)
+            primary = arr[..., 0]
+            spill_a_v = arr[..., 1]
+            spill_b_v = arr[..., 2]
+            mean_v = primary.mean().item()
+            std_v = primary.std().item()
+            err_v = (primary - c).abs().mean().item()
             ratio = mean_v / c if abs(c) > 1e-6 else float("nan")
-            results.append((c, mean_v, std_v, err_v, ratio))
-            print(f"{c:8.2f} | {mean_v:9.3f} | {std_v:7.3f} | {err_v:7.3f} | {ratio:6.2f}")
+            sa = spill_a_v.mean().item()
+            sb = spill_b_v.mean().item()
+            results.append((c, mean_v, std_v, err_v, ratio, sa, sb))
+            print(
+                f"{c:8.2f} | {mean_v:9.3f} | {std_v:7.3f} | {err_v:7.3f} | {ratio:6.2f} |"
+                f" {sa:+7.3f} | {sb:+7.3f}"
+            )
 
     if bridge is not None:
         bridge.close()
