@@ -502,7 +502,7 @@ class WMPRunner:
 
     def log(self, locs: dict, width: int = 80, pad: int = 35):
 
-        # Compute the collection size/root/booster_rl_tasks/rsl_rl/rsl_rl/runners/wmp_runner.py
+        # Compute the collection size
         collection_size = self.num_steps_per_env * self.env.num_envs * self.gpu_world_size
         # Update total time-steps and time
         self.tot_timesteps += collection_size

@@ -1,5 +1,10 @@
+import os
+
+from booster_assets import BOOSTER_ASSETS_DIR
 from isaaclab.utils import configclass
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg, RslRlSymmetryCfg
+
+_AMP_ROOT = os.path.join(BOOSTER_ASSETS_DIR, "motions", "K1", "motion_amp_expert")
 
 
 @configclass
@@ -89,7 +94,7 @@ class BaseAMPAgentCfg(RslRlOnPolicyRunnerCfg):
 
     # amp parameter
     amp_reward_coef = 0.3
-    amp_motion_files = ["/root/booster_rl_tasks/booster_assets/motions/K1/motion_amp_expert/walk.txt"]
+    amp_motion_files = [os.path.join(_AMP_ROOT, "walk.txt")]
     amp_num_preload_transitions = 200000
     amp_task_reward_lerp = 0.7
     amp_discr_hidden_dims = [1024, 512, 256]
