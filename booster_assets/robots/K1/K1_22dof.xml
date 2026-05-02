@@ -109,7 +109,7 @@
           </body>
         </body>
       </body>
-      <body name="Left_Hip_Pitch" pos="0 0.096 -0.077">
+      <body name="Left_Hip_Pitch" pos="0 0.096 -0.062">
         <inertial pos="-0.010093 -0.0019934 -0.024713" quat="0.704206 -0.178798 -0.198986 0.65767" mass="0.69" diaginertia="0.000987585 0.000880963 0.000503452"/>
         <joint name="Left_Hip_Pitch" pos="0 0 0" axis="0 1 0" range="-3 2.21" armature="0.0478125"/>
         <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.75294 0.75294 0.75294 1" mesh="Left_Hip_Pitch"/>
@@ -145,7 +145,7 @@
           </body>
         </body>
       </body>
-      <body name="Right_Hip_Pitch" pos="0 -0.096 -0.077">
+      <body name="Right_Hip_Pitch" pos="0 -0.096 -0.062">
         <inertial pos="-0.010065 0.0020086 -0.024739" quat="0.656712 -0.199052 -0.176963 0.705544" mass="0.69" diaginertia="0.000988671 0.000880749 0.00050458"/>
         <joint name="Right_Hip_Pitch" pos="0 0 0" axis="0 1 0" range="-3 2.21" armature="0.0478125"/>
         <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.75294 0.75294 0.75294 1" mesh="Right_Hip_Pitch"/>
