@@ -76,6 +76,57 @@ from isaaclab.utils.pretrained_checkpoint import get_published_pretrained_checkp
 
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper, export_policy_as_jit, export_policy_as_onnx
 
+
+def _split_obs(obs_td):
+    groups = dict(obs_td.items()) if hasattr(obs_td, "items") else dict(obs_td)
+    policy_obs = groups.pop("policy")
+    return policy_obs, groups
+
+
+class _UnwrappedProxy:
+    """Holds the unwrapped base env so `proxy.env` returns it.
+
+    The vendored rsl_rl runners reach into `self.env.env.env.step_dt`, counting on a
+    specific wrapper depth. RecordVideo adds an extra wrapper when --video is on,
+    which breaks that chain. This proxy normalizes it.
+    """
+
+    def __init__(self, unwrapped):
+        self.env = unwrapped
+
+
+class _LegacyRslRlEnv:
+    def __init__(self, env):
+        self._env = env
+
+    def __getattr__(self, name):
+        return getattr(self._env, name)
+
+    @property
+    def env(self):
+        return _UnwrappedProxy(self._env.unwrapped)
+
+    def get_observations(self):
+        obs, others = _split_obs(self._env.get_observations())
+        return obs, {"observations": others}
+
+    def reset(self):
+        obs_td, extras = self._env.reset()
+        obs, others = _split_obs(obs_td)
+        extras = dict(extras) if extras is not None else {}
+        extras["observations"] = others
+        return obs, extras
+
+    def step(self, actions):
+        obs_td, rew, dones, infos = self._env.step(actions)
+        obs, others = _split_obs(obs_td)
+        infos = dict(infos) if infos is not None else {}
+        infos["observations"] = others
+        return obs, rew, dones, infos
+
+    def close(self):
+        return self._env.close()
+
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
@@ -93,6 +144,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # override configurations with non-hydra CLI arguments
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+
+    # when recording, track the robot so it stays in frame regardless of its world position
+    if args_cli.video:
+        env_cfg.viewer.origin_type = "asset_root"
+        env_cfg.viewer.asset_name = "robot"
+        env_cfg.viewer.eye = (2.5, -2.5, 0.8)
+        env_cfg.viewer.lookat = (0.0, 0.0, 0.3)
 
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here
@@ -136,6 +194,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+    env = _LegacyRslRlEnv(env)
 
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
     # load previously trained model

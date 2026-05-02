@@ -95,6 +95,50 @@ from isaaclab.utils.io import dump_yaml
 
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper
 
+
+def _split_obs(obs_td):
+    """Split a TensorDict of obs groups into (policy_tensor, observations_dict).
+
+    The fork of rsl_rl used by this repo expects `env.get_observations()` to return
+    `(obs, extras)` and `env.step()` to expose other groups under
+    `infos["observations"]`. IsaacLab's modern RslRlVecEnvWrapper returns a
+    single TensorDict of all groups, so adapt the shape here.
+    """
+    groups = dict(obs_td.items()) if hasattr(obs_td, "items") else dict(obs_td)
+    policy_obs = groups.pop("policy")
+    return policy_obs, groups
+
+
+class _LegacyRslRlEnv:
+    """Adapter making the new RslRlVecEnvWrapper behave like the legacy one the fork expects."""
+
+    def __init__(self, env: RslRlVecEnvWrapper):
+        self._env = env
+
+    def __getattr__(self, name):
+        return getattr(self._env, name)
+
+    def get_observations(self):
+        obs, others = _split_obs(self._env.get_observations())
+        return obs, {"observations": others}
+
+    def reset(self):
+        obs_td, extras = self._env.reset()
+        obs, others = _split_obs(obs_td)
+        extras = dict(extras) if extras is not None else {}
+        extras["observations"] = others
+        return obs, extras
+
+    def step(self, actions):
+        obs_td, rew, dones, infos = self._env.step(actions)
+        obs, others = _split_obs(obs_td)
+        infos = dict(infos) if infos is not None else {}
+        infos["observations"] = others
+        return obs, rew, dones, infos
+
+    def close(self):
+        return self._env.close()
+
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
@@ -155,7 +199,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
-
     # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv):
         env = multi_agent_to_single_agent(env)
@@ -178,9 +221,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+    # adapt to legacy (obs, extras) API expected by the vendored rsl_rl fork
+    env = _LegacyRslRlEnv(env)
     # create runner from rsl-rl
-    runner = WMPRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
-    # runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+    runner_class_name = getattr(agent_cfg, "runner_class_name", "OnPolicyRunner")
+    if runner_class_name == "AmpOnPolicyRunner":
+        runner = AmpOnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+    elif runner_class_name == "WMPRunner":
+        runner = WMPRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+    else:
+        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
 
     # write git state to logs
     runner.add_git_repo_to_log(__file__)
