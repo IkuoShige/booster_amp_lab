@@ -185,6 +185,50 @@ def tracking_head_height(
     
     return reward
 
+
+def yaw_only_track_ang_vel_z_exp(
+    env: ManagerBasedRLEnv,
+    std: float,
+    command_name: str,
+    lin_threshold: float = 0.15,
+    yaw_threshold: float = 0.15,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Extra yaw tracking reward for near-in-place turn commands."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    yaw_only = (torch.norm(command[:, :2], dim=1) < lin_threshold) & (torch.abs(command[:, 2]) > yaw_threshold)
+    ang_vel_error = torch.square(command[:, 2] - asset.data.root_ang_vel_b[:, 2])
+    return torch.exp(-ang_vel_error / std**2) * yaw_only
+
+
+def yaw_only_feet_air_time(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    sensor_cfg: SceneEntityCfg,
+    threshold: float,
+    lin_threshold: float = 0.15,
+    yaw_threshold: float = 0.15,
+) -> torch.Tensor:
+    """Small stepping incentive for near-in-place yaw commands."""
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    first_contact = contact_sensor.compute_first_contact(env.step_dt)[:, sensor_cfg.body_ids]
+    last_air_time = contact_sensor.data.last_air_time[:, sensor_cfg.body_ids]
+    command = env.command_manager.get_command(command_name)
+    yaw_only = (torch.norm(command[:, :2], dim=1) < lin_threshold) & (torch.abs(command[:, 2]) > yaw_threshold)
+    reward = torch.sum((last_air_time - threshold) * first_contact, dim=1)
+    return reward * yaw_only
+
+
+def body_ang_vel_xy_l2(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Penalize roll/pitch angular velocity of selected body links."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    ang_vel_xy = asset.data.body_link_ang_vel_w[:, asset_cfg.body_ids, :2]
+    return torch.sum(torch.square(ang_vel_xy), dim=(1, 2))
+
 def feet_stumble(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
     # extract the used quantities (to enable type-hinting)
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]

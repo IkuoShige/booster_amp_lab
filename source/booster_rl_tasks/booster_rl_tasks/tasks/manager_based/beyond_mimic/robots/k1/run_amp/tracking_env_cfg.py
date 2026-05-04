@@ -288,9 +288,30 @@ class RewardsCfg:
     track_ang_vel_z_exp = RewTerm(
         func=mdp.track_ang_vel_z_exp, weight=2.5, params={"command_name": "base_velocity", "std": math.sqrt(0.5)}
     )
+    yaw_only_track_ang_vel_z_exp = RewTerm(
+        func=mdp.yaw_only_track_ang_vel_z_exp,
+        weight=1.5,
+        params={"command_name": "base_velocity", "std": 0.25, "lin_threshold": 0.15, "yaw_threshold": 0.15},
+    )
+    yaw_only_feet_air_time = RewTerm(
+        func=mdp.yaw_only_feet_air_time,
+        weight=0.25,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[".*_foot_.*"]),
+            "command_name": "base_velocity",
+            "threshold": 0.12,
+            "lin_threshold": 0.15,
+            "yaw_threshold": 0.15,
+        },
+    )
     # # -- penalties
     lin_vel_z_l2 = RewTerm(func=mdp.lin_vel_z_l2, weight=-2.0)
-    ang_vel_xy_l2 = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.05)
+    ang_vel_xy_l2 = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.15)
+    head_ang_vel_xy_l2 = RewTerm(
+        func=mdp.body_ang_vel_xy_l2,
+        weight=-0.03,
+        params={"asset_cfg": SceneEntityCfg("robot", body_names=["Head_2"])},
+    )
     dof_torques_l2 = RewTerm(func=mdp.joint_torques_l2, weight=-1.0e-5)
     dof_acc_l2 = RewTerm(func=mdp.joint_acc_l2, weight=-2.5e-7)
     action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
