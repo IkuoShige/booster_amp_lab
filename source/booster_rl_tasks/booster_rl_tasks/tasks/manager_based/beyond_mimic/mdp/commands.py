@@ -12,6 +12,7 @@ from isaaclab.assets import Articulation
 from isaaclab.managers import CommandTerm, CommandTermCfg
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.markers.config import FRAME_MARKER_CFG
+from isaaclab.envs.mdp.commands import UniformVelocityCommand, UniformVelocityCommandCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.math import (
     quat_apply,
@@ -25,6 +26,43 @@ from isaaclab.utils.math import (
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
+
+
+class OmniVelocityCommand(UniformVelocityCommand):
+    """Uniform velocity command with an explicit yaw-only/pivot subset."""
+
+    cfg: "OmniVelocityCommandCfg"
+
+    def _resample_command(self, env_ids: Sequence[int]):
+        super()._resample_command(env_ids)
+        if self.cfg.rel_yaw_only_envs <= 0.0 or len(env_ids) == 0:
+            return
+
+        r = torch.empty(len(env_ids), device=self.device)
+        yaw_only_mask = r.uniform_(0.0, 1.0) <= self.cfg.rel_yaw_only_envs
+        yaw_only_ids = torch.as_tensor(env_ids, device=self.device)[yaw_only_mask]
+        if yaw_only_ids.numel() == 0:
+            return
+
+        self.vel_command_b[yaw_only_ids, 0] = 0.0
+        self.vel_command_b[yaw_only_ids, 1] = 0.0
+        yaw_abs = r[: yaw_only_ids.numel()].uniform_(
+            self.cfg.yaw_only_ang_vel_abs_range[0], self.cfg.yaw_only_ang_vel_abs_range[1]
+        )
+        yaw_sign = torch.where(r[: yaw_only_ids.numel()].uniform_(0.0, 1.0) <= 0.5, 1.0, -1.0)
+        self.vel_command_b[yaw_only_ids, 2] = yaw_abs * yaw_sign
+
+
+@configclass
+class OmniVelocityCommandCfg(UniformVelocityCommandCfg):
+    """Configuration for omni locomotion commands with explicit pivot samples."""
+
+    class_type: type = OmniVelocityCommand
+    rel_yaw_only_envs: float = 0.15
+    """Probability that a sampled command is pure yaw, i.e. pivot in place."""
+
+    yaw_only_ang_vel_abs_range: tuple[float, float] = (0.15, 0.3)
+    """Absolute yaw-rate range used for yaw-only samples."""
 
 
 class MotionLoader:

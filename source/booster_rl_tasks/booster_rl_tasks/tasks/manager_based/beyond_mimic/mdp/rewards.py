@@ -167,6 +167,7 @@ def tracking_head_height(
     threshold :float | None,
     std: float, 
     command_name: str,
+    command_threshold: float = 1.0,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=["Head_2"]),
 ) -> torch.Tensor:
     """reward asset height from its target using L2 squared kernel.
@@ -180,7 +181,7 @@ def tracking_head_height(
         adjust_height = asset.data.body_pos_w[:, asset_cfg.body_ids, 2]
     error = torch.squeeze((torch.abs(adjust_height - target_head_height)), dim=1)
     reward = torch.exp(-error / std**2)
-    reward *= torch.norm(env.command_manager.get_command(command_name), dim=1) > 1.0
+    reward *= torch.norm(env.command_manager.get_command(command_name), dim=1) > command_threshold
     
     return reward
 

@@ -75,19 +75,22 @@ class MySceneCfg(InteractiveSceneCfg):
 class CommandsCfg:
     """Command specifications for the MDP."""
 
-    base_velocity = mdp.UniformVelocityCommandCfg(
+    base_velocity = mdp.OmniVelocityCommandCfg(
         asset_name="robot",
         resampling_time_range=(10.0, 10.0),
-        # Omni-directional: x range starts at 0 so pure side-step is sampled,
-        # y range matches retargeted strafe clip speeds (~0.5 m/s peak).
-        # rel_standing_envs kept at 0.02 to focus learning on moving commands.
+        # Resume from run_amp_y but widen the command range for backward and
+        # faster lateral motion. This is intentionally still trained with the
+        # 56-col AMP layout below; 62-col/root-velocity AMP is reserved for a
+        # later low-weight fine-tune ablation.
         rel_standing_envs=0.02,
         rel_heading_envs=1.0,
         heading_command=False,
         heading_control_stiffness=0.5,
+        rel_yaw_only_envs=0.15,
+        yaw_only_ang_vel_abs_range=(0.15, 0.3),
         debug_vis=True,
         ranges=mdp.UniformVelocityCommandCfg.Ranges(
-            lin_vel_x=(0.0, 2.0), lin_vel_y=(-0.5, 0.5), ang_vel_z=(-0.3, 0.3)
+            lin_vel_x=(-1.0, 2.0), lin_vel_y=(-1.0, 1.0), ang_vel_z=(-0.3, 0.3)
         ),
     )
 
@@ -139,20 +142,15 @@ class ObservationsCfg:
             self.concatenate_terms = True
     @configclass
     class AMPObsCfg(ObsGroup):
-        # 62-col layout: joint_pos[22] + joint_vel[22] + EE_pos_b[12]
-        #                + base_lin_vel_b[3] + base_ang_vel_b[3].
-        # Order MUST match the AMP txt corpus column layout consumed by the
-        # discriminator (see AMPLoader.OBS_DIM_WITH_ROOT). Adding root
-        # velocities lets the discriminator penalize "kick-without-COM-shift"
-        # gait modes that pass joint+EE only.
+        # 56-col layout for compatibility with run_amp_y:
+        # joint_pos[22] + joint_vel[22] + EE_pos_b[12].
+        # Do not add root velocity terms here for this resume run.
         joint_pos = ObsTerm(func=mdp.joint_pos, clip=(-100.0, 100.0), scale=1.0,)
         joint_vel = ObsTerm(func=mdp.joint_vel, clip=(-100.0, 100.0), scale=1.0,)
         left_hand_pos = ObsTerm(func=mdp.get_lefthand_pos, clip=(-100.0, 100.0), scale=1.0,)
         right_hand_pos = ObsTerm(func=mdp.get_righthand_pos, clip=(-100.0, 100.0), scale=1.0,)
         left_foot_pos = ObsTerm(func=mdp.get_leftfoot_pos, clip=(-100.0, 100.0), scale=1.0,)
         right_foot_pos = ObsTerm(func=mdp.get_rightfoot_pos, clip=(-100.0, 100.0), scale=1.0,)
-        base_lin_vel = ObsTerm(func=mdp.base_lin_vel, clip=(-100.0, 100.0), scale=1.0,)
-        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, clip=(-100.0, 100.0), scale=1.0,)
 
         def __post_init__(self):
             self.enable_corruption = False
@@ -255,7 +253,7 @@ class RewardsCfg:
         weight= 0.5,
         params={"sensor_cfg": SceneEntityCfg("contact_forces"), "command_name": "base_velocity", "threshold": 0.5 },
     )
-    head_height = RewTerm(func=mdp.tracking_head_height, params={"target_head_height": 0.35 ,"threshold": 0.8179, "std": 0.3, "command_name": "base_velocity", "asset_cfg": SceneEntityCfg("robot", body_names=["Head_2"])}, weight=3.0)
+    head_height = RewTerm(func=mdp.tracking_head_height, params={"target_head_height": 0.35 ,"threshold": 0.8179, "std": 0.3, "command_name": "base_velocity", "command_threshold": 0.2, "asset_cfg": SceneEntityCfg("robot", body_names=["Head_2"])}, weight=3.0)
     keep_balance = RewTerm(
         func=mdp.stay_alive,
         weight=1.0
