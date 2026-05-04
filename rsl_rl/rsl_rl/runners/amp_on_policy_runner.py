@@ -485,8 +485,36 @@ class AmpOnPolicyRunner:
         loaded_dict = torch.load(path, weights_only=False)
         # -- Load model
         resumed_training = self.alg.policy.load_state_dict(loaded_dict["model_state_dict"])
-        self.alg.discriminator.load_state_dict(loaded_dict["discriminator_state_dict"])
-        self.alg.amp_normalizer = loaded_dict["amp_normalizer"]
+
+        # The AMP observation layout has changed over time (e.g. 59-col legacy
+        # corpora vs. 62-col omni corpora). The actor/critic don't see AMP obs,
+        # so policies remain loadable across that change, but the discriminator
+        # and amp_normalizer are sized to the AMP obs dim and will mismatch.
+        # Load them defensively so old checkpoints can still be played; a fresh
+        # discriminator is harmless at inference and only matters when resuming
+        # training (which the warning makes obvious).
+        ckpt_disc = loaded_dict["discriminator_state_dict"]
+        runtime_disc = self.alg.discriminator.state_dict()
+        disc_compatible = all(
+            k in runtime_disc and runtime_disc[k].shape == v.shape
+            for k, v in ckpt_disc.items()
+        )
+        if disc_compatible:
+            self.alg.discriminator.load_state_dict(ckpt_disc)
+        else:
+            print(
+                f"[AmpOnPolicyRunner] Skipping discriminator load: shape mismatch with checkpoint at {path}. "
+                "Likely an AMP-obs-dim change between training and current env. "
+                "Inference is unaffected; resuming training would start the discriminator from scratch."
+            )
+
+        ckpt_norm = loaded_dict["amp_normalizer"]
+        if getattr(ckpt_norm, "mean", None) is not None and ckpt_norm.mean.shape == self.alg.amp_normalizer.mean.shape:
+            self.alg.amp_normalizer = ckpt_norm
+        else:
+            print(
+                "[AmpOnPolicyRunner] Skipping amp_normalizer load: shape mismatch with checkpoint."
+            )
         # -- Load RND model if used
         if self.alg.rnd:
             self.alg.rnd.load_state_dict(loaded_dict["rnd_state_dict"])
@@ -503,12 +531,18 @@ class AmpOnPolicyRunner:
                 # is not loaded, as the observation space could differ from the previous rl training.
                 self.privileged_obs_normalizer.load_state_dict(loaded_dict["obs_norm_state_dict"])
         # -- load optimizer if used
-        if load_optimizer and resumed_training:
+        # Skip optimizer when the discriminator was reinitialized: optimizer
+        # state references parameter tensors with the old shapes.
+        if load_optimizer and resumed_training and disc_compatible:
             # -- algorithm optimizer
             self.alg.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
             # -- RND optimizer if used
             if self.alg.rnd:
                 self.alg.rnd_optimizer.load_state_dict(loaded_dict["rnd_optimizer_state_dict"])
+        elif load_optimizer and resumed_training and not disc_compatible:
+            print(
+                "[AmpOnPolicyRunner] Skipping optimizer load: discriminator was reinitialized."
+            )
         # -- load current learning iteration
         if resumed_training:
             self.current_learning_iteration = loaded_dict["iter"]
