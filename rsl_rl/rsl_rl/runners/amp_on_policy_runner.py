@@ -273,8 +273,22 @@ class AmpOnPolicyRunner:
                     terminal_amp_states = extras["observations"].get("amp_observations")[reset_env_ids]
                     next_amp_obs_with_term[reset_env_ids] = terminal_amp_states
 
+                    amp_reward_scale = None
+                    zero_command_amp_scale = self.cfg.get("amp_zero_command_scale", 1.0)
+                    if zero_command_amp_scale != 1.0:
+                        command_name = self.cfg.get("amp_command_name", "base_velocity")
+                        command_threshold = self.cfg.get("amp_zero_command_threshold", 1.0e-6)
+                        command = self.env.env.env.command_manager.get_command(command_name).to(self.device)
+                        zero_command = torch.norm(command, dim=1) < command_threshold
+                        amp_reward_scale = torch.ones_like(rewards)
+                        amp_reward_scale[zero_command] = zero_command_amp_scale
+
                     rewards = self.alg.discriminator.predict_amp_reward(
-                        amp_obs, next_amp_obs_with_term, rewards, normalizer=self.alg.amp_normalizer
+                        amp_obs,
+                        next_amp_obs_with_term,
+                        rewards,
+                        normalizer=self.alg.amp_normalizer,
+                        amp_reward_scale=amp_reward_scale,
                     )[0]
                     amp_obs = torch.clone(next_amp_obs)
                     self.alg.process_env_step(rewards, dones, infos, next_amp_obs_with_term)
