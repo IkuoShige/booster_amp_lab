@@ -10,3 +10,7 @@
 *.pt filter=lfs diff=lfs merge=lfs -text
 *.jit filter=lfs diff=lfs merge=lfs -text
 *.hdf5 filter=lfs diff=lfs merge=lfs -text
+
+# Small, pinned reproduction artifacts.  Keep these directly in git so the v44
+# frozen AMP base and Stage3 world model are available even without git-lfs.
+checkpoints/recovery_controller_v44/*.pt -filter -diff -merge -text

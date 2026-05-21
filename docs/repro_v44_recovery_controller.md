@@ -22,6 +22,12 @@ Frozen base used by v44:
 logs/rsl_rl/run_amp_y/2026-05-11_17-47-06_amp_axis_ft_v2_20260511_174702/model_81999.pt
 ```
 
+Tracked copy for reproduction:
+
+```text
+checkpoints/recovery_controller_v44/amp_base_model_81999.pt
+```
+
 It resumed from:
 
 ```text
@@ -69,6 +75,12 @@ Checkpoint kept:
 
 ```text
 model_699.pt
+```
+
+Tracked copy for reproduction:
+
+```text
+checkpoints/recovery_controller_v44/stage3_world_model_699.pt
 ```
 
 Key settings:
@@ -206,6 +218,15 @@ BOOSTER_TRACK_ADAPTER_STYLE_WEIGHT=0.02
 BOOSTER_TRACK_ADAPTER_REG_WEIGHT=0.025
 ```
 
+For a clone that does not carry local `logs/`, point the base checkpoint and
+pretrained world model at the tracked copies:
+
+```bash
+BOOSTER_TRACK_ADAPTER_BASE_CHECKPOINT=/workspace/booster_amp_lab/checkpoints/recovery_controller_v44/amp_base_model_81999.pt
+BOOSTER_TRACK_ADAPTER_PRETRAINED_WM=/workspace/booster_amp_lab/checkpoints/recovery_controller_v44/stage3_world_model_699.pt
+BOOSTER_TRACK_ADAPTER_SKIP_STAGE3=1
+```
+
 The wrapper runs Stage3 first, then PPO.  The direct command shape is:
 
 ```bash
@@ -320,3 +341,9 @@ The policy is now one checkpoint per run.  The cleanup explicitly preserved:
 Non-checkpoint artifacts such as `params/`, saved `git/` diffs, TensorBoard
 events, and fixed-eval summaries were left in place because they are needed for
 reproduction and audit.
+
+The two smallest required reproduction binaries are also tracked directly in:
+
+```text
+checkpoints/recovery_controller_v44/
+```
