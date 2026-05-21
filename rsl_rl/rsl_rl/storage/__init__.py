@@ -19,6 +19,14 @@
 """Implementation of transitions storage for RL-agent."""
 
 from .replay_buffer import ReplayBuffer
+from .track_adapter_rollout_storage import TrackAdapterRolloutStorage
+from .track_adapter_world_model_replay_buffer import TrackAdapterWorldModelReplayBuffer
 from .wm_rollout_storage import WM_RolloutStorage
 from .rollout_storage import RolloutStorage
-__all__ = ["RolloutStorage", "WM_RolloutStorage", "ReplayBuffer"]
+__all__ = [
+    "RolloutStorage",
+    "WM_RolloutStorage",
+    "TrackAdapterRolloutStorage",
+    "TrackAdapterWorldModelReplayBuffer",
+    "ReplayBuffer",
+]

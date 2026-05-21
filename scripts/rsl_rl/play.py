@@ -43,6 +43,15 @@ parser.add_argument(
 )
 parser.add_argument("--viser_host", type=str, default="0.0.0.0", help="Viser server bind host.")
 parser.add_argument("--viser_port", type=int, default=8080, help="Viser server port.")
+parser.add_argument(
+    "--fixed_command",
+    type=float,
+    nargs=3,
+    default=None,
+    metavar=("VX", "VY", "WZ"),
+    help="Override base_velocity command every step during play.",
+)
+parser.add_argument("--disable_push", action="store_true", default=False, help="Disable interval push events for play.")
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -67,7 +76,7 @@ import os
 import time
 import torch
 
-from rsl_rl.runners import AmpOnPolicyRunner, OnPolicyRunner
+from rsl_rl.runners import AmpOnPolicyRunner, OnPolicyRunner, TrackAdapterRunner
 # from rsl_rl.runners import  OnPolicyRunner
 
 
@@ -164,6 +173,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    if args_cli.disable_push and hasattr(env_cfg, "events") and hasattr(env_cfg.events, "push_robot"):
+        env_cfg.events.push_robot = None
 
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
@@ -206,8 +217,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
     # load previously trained model
-    ppo_runner = AmpOnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    # ppo_runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    runner_class_name = getattr(agent_cfg, "runner_class_name", "OnPolicyRunner")
+    if runner_class_name == "AmpOnPolicyRunner":
+        ppo_runner = AmpOnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    elif runner_class_name == "TrackAdapterRunner":
+        ppo_runner = TrackAdapterRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    else:
+        ppo_runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
 
     ppo_runner.load(resume_path)
 
@@ -233,15 +249,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     else:
         normalizer = None
 
-    # export policy to onnx/jit
+    # export policy to onnx/jit. TrackAdapterActorCritic does not expose the
+    # standard RSL-RL .actor/.student module, so skip export for visual play.
     export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
     run_name = os.path.basename(log_dir)
-    export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir,
-                         filename=f"{agent_cfg.experiment_name}_{run_name}.pt")
-    export_policy_as_onnx(
-        policy_nn, normalizer=normalizer, path=export_model_dir,
-        filename=f"{agent_cfg.experiment_name}_{run_name}.onnx"
-    )
+    if runner_class_name == "TrackAdapterRunner":
+        print("[INFO] Skipping JIT/ONNX export for TrackAdapterRunner play.")
+    else:
+        export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir,
+                             filename=f"{agent_cfg.experiment_name}_{run_name}.pt")
+        export_policy_as_onnx(
+            policy_nn, normalizer=normalizer, path=export_model_dir,
+            filename=f"{agent_cfg.experiment_name}_{run_name}.onnx"
+        )
 
     if args_cli.headless and not args_cli.video and not args_cli.viser:
         print("[INFO] Headless mode and no video recording. Exiting after model export.")
@@ -253,6 +273,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # optional viser web viewer
     bridge = None
     cmd_term = None
+    fixed_command = None
+    if args_cli.fixed_command is not None:
+        fixed_command = torch.tensor(args_cli.fixed_command, device=env.unwrapped.device, dtype=torch.float32)
+        try:
+            cmd_term = env.unwrapped.command_manager.get_term("base_velocity")
+        except Exception:
+            cmd_term = None
+            print("[WARN] --fixed_command requested, but no base_velocity command term was found.")
     if args_cli.viser:
         from viser_bridge import BoosterViserBridge
 
@@ -269,6 +297,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if version("rsl-rl-lib").startswith("2.3."):
         obs, _ = obs
     timestep = 0
+    dones = None
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
@@ -277,10 +306,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # apply joystick override before stepping so the policy sees it next step
             if bridge is not None and cmd_term is not None:
                 bridge.apply_joystick(cmd_term)
+            if fixed_command is not None and cmd_term is not None and hasattr(cmd_term, "vel_command_b"):
+                cmd_term.vel_command_b[:] = fixed_command
             # agent stepping
-            actions = policy(obs)
+            if runner_class_name == "TrackAdapterRunner":
+                actions = policy(obs, dones=dones)
+            else:
+                actions = policy(obs)
             # env stepping
-            obs, _, _, _ = env.step(actions)
+            obs, _, dones, _ = env.step(actions)
+            if fixed_command is not None and cmd_term is not None and hasattr(cmd_term, "vel_command_b"):
+                cmd_term.vel_command_b[:] = fixed_command
         if bridge is not None:
             bridge.update()
         if args_cli.video:

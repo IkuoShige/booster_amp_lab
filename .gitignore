@@ -43,6 +43,10 @@ docker/.container.cfg
 docker/artifacts/
 *.tmp
 
+# Ad-hoc training launch/watch scripts are intentionally local notes.
+/scripts/rsl_rl/run_*.sh
+/scripts/rsl_rl/watch_*.sh
+
 # Doc Outputs
 **/docs/_build/*
 **/generated/*

@@ -20,6 +20,14 @@
 
 from .amp_on_policy_runner import AmpOnPolicyRunner
 from .on_policy_runner import OnPolicyRunner
+from .track_adapter_runner import TrackAdapterRunner
+from .track_adapter_world_model_pretrain_runner import TrackAdapterWorldModelPretrainRunner
 from .wmp_runner import WMPRunner
 
-__all__ = ["OnPolicyRunner", "AmpOnPolicyRunner","WMPRunner"]
+__all__ = [
+    "OnPolicyRunner",
+    "AmpOnPolicyRunner",
+    "TrackAdapterRunner",
+    "TrackAdapterWorldModelPretrainRunner",
+    "WMPRunner",
+]

@@ -74,12 +74,14 @@ if args_cli.distributed and version.parse(installed_version) < version.parse(RSL
 """Rest everything follows."""
 
 import gymnasium as gym
+import faulthandler
 import os
+import signal
 import torch
 from datetime import datetime
 
 import omni
-from rsl_rl.runners import AmpOnPolicyRunner, OnPolicyRunner, WMPRunner
+from rsl_rl.runners import AmpOnPolicyRunner, OnPolicyRunner, TrackAdapterRunner, WMPRunner
 # from rsl_rl.runners import  OnPolicyRunner
 
 
@@ -107,6 +109,29 @@ def _split_obs(obs_td):
     groups = dict(obs_td.items()) if hasattr(obs_td, "items") else dict(obs_td)
     policy_obs = groups.pop("policy")
     return policy_obs, groups
+
+
+def _env_truthy(name: str) -> bool:
+    return os.getenv(name, "0").lower() in ("1", "true", "yes", "on")
+
+
+def _track_adapter_full_training_unlocked() -> bool:
+    return (
+        _env_truthy("BOOSTER_TRACK_ADAPTER_FULL_TRAINING")
+        and _env_truthy("BOOSTER_TRACK_ADAPTER_SMOKE_PASSED")
+        and _env_truthy("BOOSTER_TRACK_ADAPTER_ALLOW_FULL_TRAINING")
+    )
+
+
+def _install_debug_signal_handlers():
+    if not _env_truthy("BOOSTER_TRAIN_DEBUG_SIGNALS"):
+        return
+    faulthandler.enable(all_threads=True)
+    try:
+        faulthandler.register(signal.SIGUSR1, all_threads=True, chain=False)
+        print("[train-debug] SIGUSR1 will dump Python stacks.", flush=True)
+    except RuntimeError as exc:
+        print(f"[train-debug] Could not register SIGUSR1 faulthandler: {exc}", flush=True)
 
 
 class _LegacyRslRlEnv:
@@ -154,12 +179,28 @@ torch.backends.cudnn.benchmark = False
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlOnPolicyRunnerCfg):
     """Train with RSL-RL agent."""
+    _install_debug_signal_handlers()
     # override configurations with non-hydra CLI arguments
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     agent_cfg.max_iterations = (
         args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg.max_iterations
     )
+    if getattr(agent_cfg, "runner_class_name", None) == "TrackAdapterRunner":
+        smoke_limit = int(getattr(agent_cfg, "max_iterations_without_full_training_unlock", 64))
+        requested_iterations = int(getattr(agent_cfg, "gated_requested_max_iterations", agent_cfg.max_iterations))
+        requested_iterations = max(requested_iterations, int(agent_cfg.max_iterations))
+        full_unlocked = bool(
+            getattr(agent_cfg, "allow_full_training", False)
+        ) and _track_adapter_full_training_unlocked()
+        if requested_iterations > smoke_limit and not full_unlocked:
+            raise RuntimeError(
+                "Refusing Track Adapter full training before gates are unlocked. "
+                f"Requested {requested_iterations} iterations; smoke limit is {smoke_limit}. "
+                "Run a bounded smoke first, then set BOOSTER_TRACK_ADAPTER_FULL_TRAINING=1, "
+                "BOOSTER_TRACK_ADAPTER_SMOKE_PASSED=1, and BOOSTER_TRACK_ADAPTER_ALLOW_FULL_TRAINING=1 "
+                "only after contact/residual/style/sudden-stop gates pass."
+            )
 
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here
@@ -227,6 +268,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     runner_class_name = getattr(agent_cfg, "runner_class_name", "OnPolicyRunner")
     if runner_class_name == "AmpOnPolicyRunner":
         runner = AmpOnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+    elif runner_class_name == "TrackAdapterRunner":
+        runner = TrackAdapterRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     elif runner_class_name == "WMPRunner":
         runner = WMPRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     else:
@@ -238,7 +281,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         # load previously trained model
-        runner.load(resume_path)
+        load_optimizer = True
+        if runner_class_name == "AmpOnPolicyRunner":
+            load_optimizer = os.getenv("BOOSTER_AMP_LOAD_OPTIMIZER", "1").lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+            if not load_optimizer:
+                print("[INFO]: Loading AMP checkpoint without optimizer state.")
+        if runner_class_name == "TrackAdapterRunner":
+            load_optimizer = os.getenv("BOOSTER_TRACK_ADAPTER_LOAD_OPTIMIZER", "1").lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+            if not load_optimizer:
+                print("[INFO]: Loading Track Adapter checkpoint without optimizer state.")
+        runner.load(resume_path, load_optimizer=load_optimizer)
 
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
