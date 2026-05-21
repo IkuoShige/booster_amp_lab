@@ -19,7 +19,13 @@ def get_lefthand_pos(
 ) -> torch.Tensor:
     """AMP type observations"""
     asset: Articulation = env.scene[asset_cfg.name]
-    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    device = getattr(env, "device", None)
+    if device is None:
+        try:
+            device = env.scene["robot"].device
+        except Exception:
+            device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    device = torch.device(device)
     elbow_body_ids, _ = asset.find_bodies(name_keys=["left_hand_link", "right_hand_link"], preserve_order=True)
     left_arm_local_vec = torch.tensor([0.0, 0.2, 0.0], device=device).repeat((env.num_envs, 1))
     left_hand_pos = (asset.data.body_state_w[:, elbow_body_ids[0], :3] - asset.data.root_state_w[:, 0:3] + quat_apply(asset.data.body_state_w[:, elbow_body_ids[0], 3:7], left_arm_local_vec))
@@ -235,3 +241,154 @@ def robot_contact_force(env: ManagerBasedEnv, sensor_cfg: SceneEntityCfg) -> tor
     body_contact_force = contact_sensor.data.net_forces_w[:, sensor_cfg.body_ids]
 
     return body_contact_force.reshape(body_contact_force.shape[0], -1)
+
+
+def track_adapter_recovery_privileged_state(
+    env: ManagerBasedEnv,
+    command_name: str = "base_velocity",
+    force_scale: float = 300.0,
+    duration_scale: float = 3.0,
+    foot_sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces", body_names=[".*_foot_.*"]),
+    trunk_sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces", body_names=["Trunk"]),
+    contact_threshold: float = 1.0,
+) -> torch.Tensor:
+    """Privileged recovery-only features for Track Adapter teacher training.
+
+    The deployable actor observation is intentionally unchanged.  These
+    features are only added to the critic/privileged group when explicitly
+    enabled, so the recovery teacher can see physical push state and contacts.
+    """
+
+    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    num_envs = env.num_envs
+    force_scale = max(float(force_scale), 1.0e-6)
+    duration_scale = max(float(duration_scale), 1.0e-6)
+
+    def _resolve_body_ids(contact_sensor: ContactSensor, cfg: SceneEntityCfg):
+        body_ids = getattr(cfg, "body_ids", None)
+        if body_ids is None:
+            body_names = getattr(cfg, "body_names", None)
+            if body_names is not None and hasattr(contact_sensor, "find_bodies"):
+                try:
+                    body_ids, _ = contact_sensor.find_bodies(body_names, preserve_order=True)
+                except Exception:
+                    body_ids = None
+        if body_ids is None:
+            return slice(None)
+        return body_ids
+
+    def _body_id_list(body_ids, body_count: int) -> list[int]:
+        if body_ids is None:
+            return list(range(body_count))
+        if isinstance(body_ids, slice):
+            return list(range(body_count))[body_ids]
+        if isinstance(body_ids, int):
+            return [int(body_ids)]
+        if isinstance(body_ids, torch.Tensor):
+            return [int(index) for index in body_ids.detach().cpu().reshape(-1).tolist()]
+        return [int(index) for index in body_ids]
+
+    force_xy = torch.zeros(num_envs, 2, device=device)
+    force_norm = torch.zeros(num_envs, 1, device=device)
+    force_remaining = torch.zeros(num_envs, 1, device=device)
+    force_elapsed = torch.zeros(num_envs, 1, device=device)
+    force_duration = torch.zeros(num_envs, 1, device=device)
+
+    states = getattr(env, "_booster_external_wrench_pulse_states", None)
+    if isinstance(states, dict):
+        for state in states.values():
+            forces = state.get("forces") if isinstance(state, dict) else None
+            if not isinstance(forces, torch.Tensor) or forces.numel() == 0:
+                continue
+            forces = forces.to(device)
+            resultant = forces.sum(dim=1)
+            norms = torch.norm(resultant[:, :2], dim=-1, keepdim=True)
+            replace = norms.squeeze(-1) > force_norm.squeeze(-1)
+            if torch.any(replace):
+                force_xy[replace] = resultant[replace, :2] / force_scale
+                force_norm[replace] = norms[replace] / force_scale
+                remaining = state.get("remaining_s")
+                duration = state.get("duration_s")
+                if isinstance(remaining, torch.Tensor):
+                    force_remaining[replace] = remaining.to(device)[replace].unsqueeze(-1) / duration_scale
+                if isinstance(duration, torch.Tensor):
+                    duration_value = duration.to(device)[replace].unsqueeze(-1)
+                    force_duration[replace] = duration_value / duration_scale
+                    elapsed_value = torch.clamp(duration_value - force_remaining[replace] * duration_scale, min=0.0)
+                    force_elapsed[replace] = elapsed_value / duration_scale
+
+    command_features = torch.zeros(num_envs, 9, device=device)
+    command_manager = getattr(env, "command_manager", None)
+    if command_manager is not None and hasattr(command_manager, "get_term"):
+        try:
+            command_term = command_manager.get_term(command_name)
+            metrics = getattr(command_term, "metrics", {})
+            for index, name in enumerate(
+                (
+                    "force_push_active",
+                    "force_push_started",
+                    "force_push_curriculum_alpha",
+                    "force_push_applied_force_n",
+                    "force_push_force_max_n",
+                    "failure_push_elapsed_s",
+                    "failure_push_delta_x",
+                    "failure_push_delta_y",
+                    "failure_push_delta_norm",
+                )
+            ):
+                value = metrics.get(name) if isinstance(metrics, dict) else None
+                if isinstance(value, torch.Tensor):
+                    value = value.to(device=device, dtype=command_features.dtype).reshape(-1)
+                    if value.shape[0] == num_envs:
+                        command_features[:, index] = value
+            command_features[:, 3:5] = command_features[:, 3:5] / force_scale
+            command_features[:, 5] = command_features[:, 5] / duration_scale
+        except Exception:
+            pass
+
+    foot_contact = torch.zeros(num_envs, 2, device=device)
+    try:
+        contact_sensor: ContactSensor = env.scene.sensors[foot_sensor_cfg.name]
+        forces = contact_sensor.data.net_forces_w_history.to(device)
+        body_ids = _resolve_body_ids(contact_sensor, foot_sensor_cfg)
+        body_indices = _body_id_list(body_ids, forces.shape[2])
+        contact_norm = torch.max(torch.norm(forces[:, :, body_ids], dim=-1), dim=1)[0]
+        contacts = contact_norm > float(contact_threshold)
+        body_names = list(getattr(contact_sensor, "body_names", []))
+        selected_names = [body_names[index] for index in body_indices if index < len(body_names)]
+        left_ids = [index for index, name in enumerate(selected_names) if "left" in name.lower()]
+        right_ids = [index for index, name in enumerate(selected_names) if "right" in name.lower()]
+        if left_ids:
+            foot_contact[:, 0] = torch.any(contacts[:, left_ids], dim=1).float()
+        elif contacts.shape[1] > 0:
+            foot_contact[:, 0] = contacts[:, 0].float()
+        if right_ids:
+            foot_contact[:, 1] = torch.any(contacts[:, right_ids], dim=1).float()
+        elif contacts.shape[1] > 1:
+            foot_contact[:, 1] = contacts[:, 1].float()
+    except Exception:
+        pass
+
+    trunk_contact = torch.zeros(num_envs, 1, device=device)
+    try:
+        contact_sensor: ContactSensor = env.scene.sensors[trunk_sensor_cfg.name]
+        forces = contact_sensor.data.net_forces_w_history.to(device)
+        body_ids = _resolve_body_ids(contact_sensor, trunk_sensor_cfg)
+        contact_norm = torch.max(torch.norm(forces[:, :, body_ids], dim=-1), dim=1)[0]
+        trunk_contact[:, 0] = torch.any(contact_norm > float(contact_threshold), dim=1).float()
+    except Exception:
+        pass
+
+    return torch.cat(
+        (
+            force_xy,
+            force_norm,
+            force_remaining,
+            force_elapsed,
+            force_duration,
+            command_features,
+            foot_contact,
+            trunk_contact,
+        ),
+        dim=-1,
+    )

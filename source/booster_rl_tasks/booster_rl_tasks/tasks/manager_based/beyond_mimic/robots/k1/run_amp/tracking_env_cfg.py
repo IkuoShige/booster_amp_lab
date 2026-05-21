@@ -239,6 +239,26 @@ class EventCfg:
         params={"velocity_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5)}},
     )
 
+    external_wrench_push = EventTerm(
+        func=mdp.apply_external_wrench_pulse,
+        mode="interval",
+        interval_range_s=(1.0e9, 1.0e9),
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names="Trunk"),
+            "force_magnitude_range": (0.0, 0.0),
+            "duration_range_s": (0.05, 0.05),
+            "pulse_interval_range_s": (10.0, 15.0),
+            "position_range": {"x": (0.0, 0.0), "y": (0.0, 0.0), "z": (0.0, 0.0)},
+            "torque_z_range": (0.0, 0.0),
+            "force_z_range": (0.0, 0.0),
+            "command_name": "base_velocity",
+            "equivalent_velocity_abs": 1.0,
+            "equivalent_yaw_abs": 0.30,
+            "failure_mining": True,
+            "is_global": False,
+        },
+    )
+
 
 @configclass
 class RewardsCfg:
