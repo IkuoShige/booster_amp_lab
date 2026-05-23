@@ -81,7 +81,14 @@ import torch
 from datetime import datetime
 
 import omni
-from rsl_rl.runners import AmpOnPolicyRunner, OnPolicyRunner, TrackAdapterRunner, WMPRunner
+from rsl_rl.runners import (
+    AmpOnPolicyRunner,
+    EncoderMultiCriticAmpRunner,
+    MultiCriticAmpOnPolicyRunner,
+    OnPolicyRunner,
+    TrackAdapterRunner,
+    WMPRunner,
+)
 # from rsl_rl.runners import  OnPolicyRunner
 
 
@@ -115,6 +122,13 @@ def _env_truthy(name: str) -> bool:
     return os.getenv(name, "0").lower() in ("1", "true", "yes", "on")
 
 
+def _env_truthy_default(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.lower() in ("1", "true", "yes", "on")
+
+
 def _track_adapter_full_training_unlocked() -> bool:
     return (
         _env_truthy("BOOSTER_TRACK_ADAPTER_FULL_TRAINING")
@@ -132,6 +146,48 @@ def _install_debug_signal_handlers():
         print("[train-debug] SIGUSR1 will dump Python stacks.", flush=True)
     except RuntimeError as exc:
         print(f"[train-debug] Could not register SIGUSR1 faulthandler: {exc}", flush=True)
+
+
+def _restore_curriculum_progress_from_runner(env, runner):
+    """Restore stateless curriculum progress after loading a checkpoint.
+
+    IsaacLab's ``common_step_counter`` belongs to the environment, not the
+    RSL-RL checkpoint. Without this, resumed runs silently restart curricula
+    from easy settings while the policy/iteration counter resumes from later
+    training.
+    """
+    if not _env_truthy_default("BOOSTER_RESTORE_CURRICULUM_STEP", True):
+        return
+
+    base_env = getattr(env, "unwrapped", None)
+    if base_env is None or not hasattr(base_env, "common_step_counter"):
+        return
+
+    loaded_iter = int(getattr(runner, "current_learning_iteration", 0) or 0)
+    rollout_len = int(getattr(runner, "num_steps_per_env", 0) or 0)
+    restored_step = loaded_iter * rollout_len
+    if restored_step <= 0:
+        return
+
+    base_env.common_step_counter = restored_step
+    print(
+        "[INFO]: Restored environment curriculum step from checkpoint iteration: "
+        f"iter={loaded_iter}, rollout_len={rollout_len}, common_step_counter={restored_step}"
+    )
+
+    if hasattr(base_env, "curriculum_manager"):
+        base_env.curriculum_manager.compute(env_ids=None)
+        try:
+            active_terms = base_env.curriculum_manager.get_active_iterable_terms(0)
+            print(f"[INFO]: Active curriculum after restore: {active_terms}")
+        except Exception as exc:
+            print(f"[WARN]: Could not print restored curriculum terms: {exc}")
+
+    # The RSL-RL wrapper reset the env before checkpoint load, so its initial
+    # command samples came from step 0 curriculum. Reset the full env once so
+    # all managers, observations, command samples, scene state, and buffers are
+    # consistent with the restored curriculum.
+    env.reset()
 
 
 class _LegacyRslRlEnv:
@@ -268,6 +324,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     runner_class_name = getattr(agent_cfg, "runner_class_name", "OnPolicyRunner")
     if runner_class_name == "AmpOnPolicyRunner":
         runner = AmpOnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+    elif runner_class_name == "MultiCriticAmpOnPolicyRunner":
+        runner = MultiCriticAmpOnPolicyRunner(
+            env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device
+        )
+    elif runner_class_name == "EncoderMultiCriticAmpRunner":
+        runner = EncoderMultiCriticAmpRunner(
+            env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device
+        )
     elif runner_class_name == "TrackAdapterRunner":
         runner = TrackAdapterRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     elif runner_class_name == "WMPRunner":
@@ -300,7 +364,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             )
             if not load_optimizer:
                 print("[INFO]: Loading Track Adapter checkpoint without optimizer state.")
+        if runner_class_name == "EncoderMultiCriticAmpRunner":
+            load_optimizer = os.getenv("BOOSTER_ENCODER_LOAD_OPTIMIZER", "1").lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+            if not load_optimizer:
+                print("[INFO]: Loading Encoder checkpoint without optimizer state.")
         runner.load(resume_path, load_optimizer=load_optimizer)
+        _restore_curriculum_progress_from_runner(env, runner)
 
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)

@@ -23,4 +23,14 @@ from .distillation import Distillation
 from .ppo import PPO
 from .amp_ppo import AMPPPO
 from .track_adapter_amp_ppo import TrackAdapterAMPPPO
-__all__ = ["AMPPPO", "PPO", "Distillation", "WMAMPPPO", "TrackAdapterAMPPPO"]
+from .multi_critic_amp_ppo import MultiCriticAMPPPO
+from .encoder_amp_ppo import EncoderMultiCriticAMPPPO
+__all__ = [
+    "AMPPPO",
+    "PPO",
+    "Distillation",
+    "WMAMPPPO",
+    "TrackAdapterAMPPPO",
+    "MultiCriticAMPPPO",
+    "EncoderMultiCriticAMPPPO",
+]

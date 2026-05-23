@@ -8,7 +8,6 @@
 """Launch Isaac Sim Simulator first."""
 
 import argparse
-from importlib.metadata import version
 import sys
 
 from isaaclab.app import AppLauncher
@@ -77,6 +76,11 @@ import time
 import torch
 
 from rsl_rl.runners import AmpOnPolicyRunner, OnPolicyRunner, TrackAdapterRunner
+try:
+    from rsl_rl.runners import EncoderMultiCriticAmpRunner, MultiCriticAmpOnPolicyRunner
+except ImportError:
+    EncoderMultiCriticAmpRunner = None
+    MultiCriticAmpOnPolicyRunner = None
 # from rsl_rl.runners import  OnPolicyRunner
 
 
@@ -186,7 +190,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             print("[INFO] Unfortunately a pre-trained checkpoint is currently unavailable for this task.")
             return
     elif args_cli.checkpoint:
-        resume_path = retrieve_file_path(args_cli.checkpoint)
+        # Support both:
+        #   --checkpoint /path/to/model.pt
+        #   --load_run RUN --checkpoint model_5400.pt
+        # IsaacLab's helper treats --checkpoint as a direct path here, so route
+        # bare filenames through the experiment/run resolver.
+        checkpoint = os.path.expanduser(args_cli.checkpoint)
+        if os.path.exists(checkpoint):
+            resume_path = retrieve_file_path(checkpoint)
+        else:
+            resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, args_cli.checkpoint)
     else:
         resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
 
@@ -222,10 +235,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         ppo_runner = AmpOnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     elif runner_class_name == "TrackAdapterRunner":
         ppo_runner = TrackAdapterRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    elif runner_class_name == "MultiCriticAmpOnPolicyRunner":
+        if MultiCriticAmpOnPolicyRunner is None:
+            raise RuntimeError(
+                "MultiCriticAmpOnPolicyRunner not available — install the vendored rsl_rl."
+            )
+        ppo_runner = MultiCriticAmpOnPolicyRunner(
+            env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device
+        )
+    elif runner_class_name == "EncoderMultiCriticAmpRunner":
+        if EncoderMultiCriticAmpRunner is None:
+            raise RuntimeError(
+                "EncoderMultiCriticAmpRunner not available — install the vendored rsl_rl."
+            )
+        ppo_runner = EncoderMultiCriticAmpRunner(
+            env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device
+        )
     else:
         ppo_runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
 
-    ppo_runner.load(resume_path)
+    ppo_runner.load(resume_path, load_optimizer=False)
 
     # obtain the trained policy for inference
     policy = ppo_runner.get_inference_policy(device=env.unwrapped.device)
@@ -250,11 +279,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         normalizer = None
 
     # export policy to onnx/jit. TrackAdapterActorCritic does not expose the
-    # standard RSL-RL .actor/.student module, so skip export for visual play.
+    # standard RSL-RL .actor/.student module. EncoderActorCritic exposes an
+    # internal compressed actor input, so the generic exporter feeds the wrong
+    # observation width. Skip export for visual play in these cases.
     export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
     run_name = os.path.basename(log_dir)
-    if runner_class_name == "TrackAdapterRunner":
-        print("[INFO] Skipping JIT/ONNX export for TrackAdapterRunner play.")
+    if runner_class_name in ("TrackAdapterRunner", "EncoderMultiCriticAmpRunner"):
+        print(f"[INFO] Skipping JIT/ONNX export for {runner_class_name} play.")
     else:
         export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir,
                              filename=f"{agent_cfg.experiment_name}_{run_name}.pt")
@@ -292,22 +323,73 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         except Exception:
             cmd_term = None
 
+    def _policy_obs_from_result(result):
+        obs_result = result[0] if isinstance(result, tuple) else result
+        if hasattr(obs_result, "items") and "policy" in obs_result:
+            obs_result, _ = _split_obs(obs_result)
+        return obs_result
+
+    def _get_policy_obs():
+        return _policy_obs_from_result(env.get_observations())
+
+    def _zero_actions():
+        return torch.zeros(
+            (env.num_envs, env.num_actions),
+            device=env.unwrapped.device,
+            dtype=torch.float32,
+        )
+
+    def _force_episode_reset():
+        # Do not call wrapper env.reset() from the live play loop. Force the
+        # normal IsaacLab timeout/reset path instead, so reset behaves like an
+        # episode boundary and keeps the app/viewer alive.
+        base_env = env.unwrapped
+        if hasattr(base_env, "episode_length_buf") and hasattr(base_env, "max_episode_length"):
+            base_env.episode_length_buf[:] = int(base_env.max_episode_length)
+            return env.step(_zero_actions())[0::2]
+
+        reset_obs = _policy_obs_from_result(env.reset())
+        reset_dones = torch.ones(env.num_envs, device=base_env.device, dtype=torch.long)
+        return reset_obs, reset_dones
+
     # reset environment
-    obs = env.get_observations()
-    if version("rsl-rl-lib").startswith("2.3."):
-        obs, _ = obs
+    obs = _get_policy_obs()
     timestep = 0
     dones = None
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
-        # run everything in inference mode
-        with torch.inference_mode():
+
+        if bridge is not None and bridge.consume_reset_request():
+            with torch.no_grad():
+                obs_result, dones = _force_episode_reset()
+            obs = _policy_obs_from_result(obs_result)
+            if bridge.apply_soccer_controls():
+                obs = _get_policy_obs()
+            bridge.update(force=True)
+            sleep_time = dt - (time.time() - start_time)
+            if (args_cli.real_time or args_cli.viser) and sleep_time > 0:
+                time.sleep(sleep_time)
+            continue
+
+        if bridge is not None and bridge.paused:
+            bridge.update()
+            sleep_time = dt - (time.time() - start_time)
+            if (args_cli.real_time or args_cli.viser) and sleep_time > 0:
+                time.sleep(sleep_time)
+            continue
+
+        # Keep gradients off for policy play, but do not use inference_mode
+        # around env.step(): reward/command terms mutate persistent tensors.
+        with torch.no_grad():
             # apply joystick override before stepping so the policy sees it next step
             if bridge is not None and cmd_term is not None:
                 bridge.apply_joystick(cmd_term)
+            if bridge is not None and bridge.apply_soccer_controls():
+                obs = _get_policy_obs()
             if fixed_command is not None and cmd_term is not None and hasattr(cmd_term, "vel_command_b"):
                 cmd_term.vel_command_b[:] = fixed_command
+                obs = _get_policy_obs()
             # agent stepping
             if runner_class_name == "TrackAdapterRunner":
                 actions = policy(obs, dones=dones)
@@ -317,6 +399,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             obs, _, dones, _ = env.step(actions)
             if fixed_command is not None and cmd_term is not None and hasattr(cmd_term, "vel_command_b"):
                 cmd_term.vel_command_b[:] = fixed_command
+                obs = _get_policy_obs()
+            if bridge is not None and bridge.apply_soccer_controls():
+                obs = _get_policy_obs()
         if bridge is not None:
             bridge.update()
         if args_cli.video:

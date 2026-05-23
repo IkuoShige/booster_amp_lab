@@ -60,7 +60,7 @@ parser.add_argument(
     "--categories",
     nargs="*",
     default=None,
-    choices=["forward", "lateral", "backward", "pivot"],
+    choices=["forward", "lateral", "backward", "pivot", "kick"],
     help="Restrict build to these categories.",
 )
 parser.add_argument("--robot", type=str, default="booster_k1", choices=["booster_k1"])
@@ -120,11 +120,15 @@ _PKL_TO_LAB_K1 = [
 @dataclass(frozen=True)
 class MotionSpec:
     name: str           # output filename stem
-    category: str       # forward | lateral | backward | pivot
+    category: str       # forward | lateral | backward | pivot | kick
     kind: str           # 'pkl' or 'legacy'
     source_path: str
     motion_weight: float
     fps: float | None = None  # only used as fallback for legacy txt
+    # When False, output is 56-col (no root_lin_vel / root_ang_vel) — matches
+    # the env-side ``AMPObsCfg`` used by soccer_kick_amp et al., which only
+    # observes joint+EE (no root velocity).
+    include_root_vel: bool = True
 
 
 @dataclass
@@ -185,6 +189,38 @@ _DEFAULT_SPECS: list[MotionSpec] = [
                "/workspace/motions_k1_pivot/pivot_right_slow.pkl", 0.40),
     MotionSpec("pivot_right_fast", "pivot", "pkl",
                "/workspace/motions_k1_pivot/pivot_right_fast.pkl", 0.40),
+    # --- kick (walk + kick clips, K1 csv joint order). 56-col output to
+    #     match the env-side AMPObsCfg used by soccer_kick_amp (no root vel).
+    MotionSpec("walk_kick",   "kick", "pkl",
+               "/workspace/pkl-walk-kick-k1/walk-kick.pkl",   0.40,
+               include_root_vel=False),
+    MotionSpec("walk_kick_1", "kick", "pkl",
+               "/workspace/pkl-walk-kick-k1/walk-kick-1.pkl", 0.40,
+               include_root_vel=False),
+    MotionSpec("walk_kick_2", "kick", "pkl",
+               "/workspace/pkl-walk-kick-k1/walk-kick-2.pkl", 0.40,
+               include_root_vel=False),
+    MotionSpec("walk_kick_3", "kick", "pkl",
+               "/workspace/pkl-walk-kick-k1/walk-kick-3.pkl", 0.40,
+               include_root_vel=False),
+    MotionSpec("walk_kick_4", "kick", "pkl",
+               "/workspace/pkl-walk-kick-k1/walk-kick-4.pkl", 0.40,
+               include_root_vel=False),
+    MotionSpec("walk_kick_5", "kick", "pkl",
+               "/workspace/pkl-walk-kick-k1/walk-kick-5.pkl", 0.40,
+               include_root_vel=False),
+    MotionSpec("walk_kick_6", "kick", "pkl",
+               "/workspace/pkl-walk-kick-k1/walk-kick-6.pkl", 0.40,
+               include_root_vel=False),
+    MotionSpec("walk_kick_7", "kick", "pkl",
+               "/workspace/pkl-walk-kick-k1/walk-kick-7.pkl", 0.40,
+               include_root_vel=False),
+    MotionSpec("walk_kick_8", "kick", "pkl",
+               "/workspace/pkl-walk-kick-k1/walk-kick-8.pkl", 0.40,
+               include_root_vel=False),
+    MotionSpec("walk_kick_9", "kick", "pkl",
+               "/workspace/pkl-walk-kick-k1/walk-kick-9.pkl", 0.40,
+               include_root_vel=False),
 ]
 
 
@@ -259,7 +295,8 @@ def _write_amp_txt(out_path: str, frames: np.ndarray, fps: float, motion_weight:
 
 
 def _build_one(motion: _MotionData, out_path: str, scene: InteractiveScene,
-               sim: SimulationContext, motion_weight: float) -> None:
+               sim: SimulationContext, motion_weight: float,
+               include_root_vel: bool = True) -> None:
     dt = 1.0 / motion.fps
     root_pos = motion.root_pos
     root_rot_wxyz = motion.root_rot_wxyz
@@ -334,18 +371,23 @@ def _build_one(motion: _MotionData, out_path: str, scene: InteractiveScene,
         ee = torch.cat([left_hand_b[0], right_hand_b[0], left_foot_b[0], right_foot_b[0]]).detach().cpu().numpy()
         ee_frames[i] = ee
 
-    frames = np.concatenate(
-        [
-            dof_pos_lab.astype(np.float32),
-            dof_vel_lab.astype(np.float32),
-            ee_frames,
+    frame_cols = [
+        dof_pos_lab.astype(np.float32),
+        dof_vel_lab.astype(np.float32),
+        ee_frames,
+    ]
+    if include_root_vel:
+        frame_cols += [
             lin_vel_b.astype(np.float32),
             ang_vel_b.astype(np.float32),
-        ],
-        axis=1,
-    )
-    if frames.shape[1] != 62:
-        raise AssertionError(f"unexpected width {frames.shape[1]} for {motion.name}")
+        ]
+    frames = np.concatenate(frame_cols, axis=1)
+    expected_width = 62 if include_root_vel else 56
+    if frames.shape[1] != expected_width:
+        raise AssertionError(
+            f"unexpected width {frames.shape[1]} for {motion.name} "
+            f"(expected {expected_width})"
+        )
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     _write_amp_txt(out_path, frames, fps=motion.fps, motion_weight=motion_weight)
@@ -395,7 +437,14 @@ def main() -> None:
                 else:
                     raise ValueError(f"unknown kind {spec.kind}")
                 out = os.path.join(args_cli.output_root, cat, f"{spec.name}.txt")
-                _build_one(motion, out, scene, sim, spec.motion_weight)
+                _build_one(
+                    motion,
+                    out,
+                    scene,
+                    sim,
+                    spec.motion_weight,
+                    include_root_vel=spec.include_root_vel,
+                )
             except Exception as e:
                 print(f"  ✗ {spec.name}: {e}")
                 raise

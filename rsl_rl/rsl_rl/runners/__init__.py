@@ -23,6 +23,8 @@ from .on_policy_runner import OnPolicyRunner
 from .track_adapter_runner import TrackAdapterRunner
 from .track_adapter_world_model_pretrain_runner import TrackAdapterWorldModelPretrainRunner
 from .wmp_runner import WMPRunner
+from .multi_critic_amp_runner import MultiCriticAmpOnPolicyRunner
+from .encoder_amp_runner import EncoderMultiCriticAmpRunner
 
 __all__ = [
     "OnPolicyRunner",
@@ -30,4 +32,6 @@ __all__ = [
     "TrackAdapterRunner",
     "TrackAdapterWorldModelPretrainRunner",
     "WMPRunner",
+    "MultiCriticAmpOnPolicyRunner",
+    "EncoderMultiCriticAmpRunner",
 ]

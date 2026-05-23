@@ -27,6 +27,8 @@ from .student_teacher_recurrent import StudentTeacherRecurrent
 from .actor_critic_wmp import ActorCriticWMP
 from .depth_predictor import DepthPredictor
 from .track_adapter_actor_critic import TrackAdapterActorCritic
+from .multi_critic_actor_critic import MultiCriticActorCritic
+from .encoder_actor_critic import EncoderActorCritic
 
 __all__ = [
     "ActorCritic",
@@ -39,4 +41,6 @@ __all__ = [
     "ActorCriticWMP",
     "DepthPredictor",
     "TrackAdapterActorCritic",
+    "MultiCriticActorCritic",
+    "EncoderActorCritic",
 ]
